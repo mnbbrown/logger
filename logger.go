@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"io"
@@ -27,7 +28,8 @@ type LoggerSink interface {
 // This is a list of logger sinks (io.Writer).
 // When Write is called on a Logger it loops through the list writing to the individual sinks.
 type Logger struct {
-	sinks []LoggerSink
+	sinks  []LoggerSink
+	prefix string
 }
 
 func NewLogger() *Logger {
@@ -53,6 +55,10 @@ func (l *Logger) AddLocalSink() {
 
 func (l *Logger) Printf(format string, v ...interface{}) {
 	go l.Write([]byte(fmt.Sprintf(format, v...)))
+}
+
+func (l *Logger) Print(str string) {
+	go l.Write([]byte(str))
 }
 
 func (l *Logger) Fatalln(v ...interface{}) {
@@ -106,10 +112,34 @@ func colorForMethod(method string) string {
 	}
 }
 
+type FormatBuffer struct {
+	buffer bytes.Buffer
+	items  interface{}
+}
+
+func (f *FormatBuffer) AddItems(format string, a ...interface{}) {
+	f.buffer.WriteString(format)
+	f.items = append(f.items, a...)
+}
+
+func (f *FormatBuffer) String() string {
+	return fmt.Printf(f.buffer.String(), f.items)
+}
+
 func (l *Logger) LoggerMiddleware() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		buffer := &FormatBuffer{}
+
+		// If request has been assigned a unique ID print it.
+		if id := ctx.Request.Header.Get("X-Request-Id"); id != "" {
+			buffer.AddItem("| %s ", id)
+		}
+
 		start := time.Now()
+
+		// Process request
 		ctx.Next()
+
 		end := time.Now()
 		latency := end.Sub(start)
 
@@ -117,7 +147,8 @@ func (l *Logger) LoggerMiddleware() gin.HandlerFunc {
 		statusCode := ctx.Writer.Status()
 		statusColor := colorForStatus(statusCode)
 		methodColor := colorForMethod(method)
-		l.Printf("| %s %3d %s | %5v | %s | %s %s %s %s\n%s",
+
+		buffer.AddItems("| %s %3d %s | %5v | %s | %s %s %s %s\n%s",
 			statusColor, statusCode, reset,
 			latency,
 			ClientIP(ctx),
@@ -125,6 +156,7 @@ func (l *Logger) LoggerMiddleware() gin.HandlerFunc {
 			ctx.Request.URL.Path,
 			ctx.Errors.String(),
 		)
+		l.Print(buffer.String())
 	}
 }
 
