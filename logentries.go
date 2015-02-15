@@ -15,7 +15,6 @@ type LogentriesSink struct {
 	conn      net.Conn
 	connError error
 	lock      sync.Mutex
-	prefix    string
 	token     string
 	url       string
 	port      int
@@ -102,7 +101,6 @@ func (l *LogentriesSink) Write(p []byte) (n int, err error) {
 
 	var buf []byte
 	buf = append(buf, (l.token + " ")...)
-	buf = append(buf, ("[" + l.prefix + "] ")...)
 	buf = append(buf, p...)
 
 	return l.conn.Write(buf)

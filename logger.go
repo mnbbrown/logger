@@ -1,11 +1,10 @@
 package logger
 
 import (
-	"bytes"
 	"fmt"
-	"github.com/gin-gonic/gin"
 	"io"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -18,7 +17,7 @@ var (
 	blue    = string([]byte{27, 91, 57, 55, 59, 52, 52, 109})
 	magenta = string([]byte{27, 91, 57, 55, 59, 52, 53, 109})
 	cyan    = string([]byte{27, 91, 57, 55, 59, 52, 54, 109})
-	reset   = string([]byte{27, 91, 48, 109})
+	Reset   = string([]byte("\033[0m"))
 )
 
 type LoggerSink interface {
@@ -29,28 +28,61 @@ type LoggerSink interface {
 // When Write is called on a Logger it loops through the list writing to the individual sinks.
 type Logger struct {
 	sinks  []LoggerSink
-	prefix string
+	prefix func() string
+	tags   []string
+	mu     sync.Mutex
 }
 
 func NewLogger() *Logger {
-	return &Logger{}
+	return &Logger{
+		prefix: PrefixGen,
+	}
 }
 
 func (l *Logger) AddSink(sink LoggerSink) {
+	l.mu.Lock()
 	l.sinks = append(l.sinks, sink)
+	l.mu.Unlock()
 }
 
-func (l *Logger) AddLogentriesSink(token, url string, port int) {
+func (l *Logger) SetPrefix(prefix func() string) {
+	l.prefix = prefix
+}
+
+func (l *Logger) SetTags(tags ...string) {
+	l.tags = tags
+}
+
+func (l *Logger) AddLogentriesSink(token, url string, port int) error {
 	les := &LogentriesSink{
 		token: token,
 		url:   url,
 		port:  port,
 	}
+	if err := les.Open(); err != nil {
+		return err
+	}
 	l.AddSink(les)
+	return nil
 }
 
 func (l *Logger) AddLocalSink() {
 	l.AddSink(os.Stdout)
+}
+
+func PrefixGen() string {
+	return time.Now().Format(time.RFC3339)
+}
+
+func NilGen() string {
+	return ""
+}
+
+func (l *Logger) NewRequestLogger(tags ...string) *Logger {
+	rl := NewLogger()
+	rl.AddSink(l)
+	rl.SetTags(tags...)
+	return rl
 }
 
 func (l *Logger) Printf(format string, v ...interface{}) {
@@ -71,14 +103,17 @@ func (l *Logger) Println(v ...interface{}) {
 }
 
 func (l *Logger) Write(p []byte) (n int, err error) {
+	var buf []byte
+	buf = append(buf, []byte(l.prefix()+" ")...)
+	buf = append(buf, p...)
 	for _, w := range l.sinks {
-		n, err = w.Write(p)
+		n, err = w.Write(buf)
 	}
 	return n, err
 }
 
 // https://github.com/gin-gonic/gin/blob/develop/logger.go
-func colorForStatus(code int) string {
+func StatusColour(code int) string {
 	switch {
 	case code >= 200 && code <= 299:
 		return green
@@ -91,7 +126,7 @@ func colorForStatus(code int) string {
 	}
 }
 
-func colorForMethod(method string) string {
+func MethodColour(method string) string {
 	switch {
 	case method == "GET":
 		return blue
@@ -108,65 +143,6 @@ func colorForMethod(method string) string {
 	case method == "OPTIONS":
 		return white
 	default:
-		return reset
+		return Reset
 	}
-}
-
-type FormatBuffer struct {
-	buffer bytes.Buffer
-	items  interface{}
-}
-
-func (f *FormatBuffer) AddItems(format string, a ...interface{}) {
-	f.buffer.WriteString(format)
-	f.items = append(f.items, a...)
-}
-
-func (f *FormatBuffer) String() string {
-	return fmt.Printf(f.buffer.String(), f.items)
-}
-
-func (l *Logger) LoggerMiddleware() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		buffer := &FormatBuffer{}
-
-		// If request has been assigned a unique ID print it.
-		if id := ctx.Request.Header.Get("X-Request-Id"); id != "" {
-			buffer.AddItem("| %s ", id)
-		}
-
-		start := time.Now()
-
-		// Process request
-		ctx.Next()
-
-		end := time.Now()
-		latency := end.Sub(start)
-
-		method := ctx.Request.Method
-		statusCode := ctx.Writer.Status()
-		statusColor := colorForStatus(statusCode)
-		methodColor := colorForMethod(method)
-
-		buffer.AddItems("| %s %3d %s | %5v | %s | %s %s %s %s\n%s",
-			statusColor, statusCode, reset,
-			latency,
-			ClientIP(ctx),
-			methodColor, method, reset,
-			ctx.Request.URL.Path,
-			ctx.Errors.String(),
-		)
-		l.Print(buffer.String())
-	}
-}
-
-func ClientIP(ctx *gin.Context) string {
-	clientIP := ctx.Request.Header.Get("X-Real-IP")
-	if len(clientIP) == 0 {
-		clientIP = ctx.Request.Header.Get("X-Forwarded-For")
-	}
-	if len(clientIP) == 0 {
-		clientIP = ctx.Request.RemoteAddr
-	}
-	return clientIP
 }
